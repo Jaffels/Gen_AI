@@ -1,0 +1,5 @@
+Everyone working on this chatbot is doing their Master of Science in
+Applied Information and Data Science at Lucerne University of Apllied Sciences
+and Arts.
+
+Johan Ferreira, Nhat Bui and Thilo Holstein is the creators of this chatbot.
