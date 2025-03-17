@@ -1,189 +1,183 @@
 import streamlit as st
+import os
 from PyPDF2 import PdfReader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores import FAISS
-from langchain_openai import ChatOpenAI
-from langchain.chains import ConversationalRetrievalChain
+from langchain.embeddings import OpenAIEmbeddings
+from langchain.vectorstores import FAISS
 from langchain.memory import ConversationBufferMemory
-import os
-import json
-from datetime import datetime
+from langchain.chains import ConversationalRetrievalChain
+from langchain.chat_models import ChatOpenAI
+import tempfile
 
-# Set page config
-st.set_page_config(page_title="Document Chat Assistant", page_icon="📚")
+# App title and configuration
+st.set_page_config(page_title="PDF RAG Chatbot", page_icon="📚")
+st.title("PDF-Powered RAG Chatbot")
 
-# Initialize session state variables if they don't exist
+# Initialize session state for storing conversation
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
 if "conversation" not in st.session_state:
     st.session_state.conversation = None
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-if "processed_docs" not in st.session_state:
-    st.session_state.processed_docs = False
+
 if "vector_store" not in st.session_state:
     st.session_state.vector_store = None
 
-# Create data directory if it doesn't exist
-if not os.path.exists("data"):
-    os.makedirs("data")
-if not os.path.exists("data/vector_stores"):
-    os.makedirs("data/vector_stores")
-if not os.path.exists("data/conversations"):
-    os.makedirs("data/conversations")
-
-# Main header
-st.header("📚 Chat with your PDFs")
-
-# Sidebar for API key, document upload, and saved sessions
+# Sidebar for OpenAI API key and document upload
 with st.sidebar:
-    st.subheader("Configuration")
+    st.header("Configuration")
     api_key = st.text_input("Enter your OpenAI API key:", type="password")
     os.environ["OPENAI_API_KEY"] = api_key
 
-    st.subheader("Upload Documents")
-    uploaded_files = st.file_uploader("Upload your PDF files", type="pdf", accept_multiple_files=True)
+    st.header("Upload Documents")
+    uploaded_files = st.file_uploader("Upload PDF files", type="pdf", accept_multiple_files=True)
 
-    knowledge_base_name = st.text_input("Knowledge Base Name", "my_knowledge_base")
+    model_option = st.selectbox(
+        "Select OpenAI Model",
+        ("gpt-4o-mini", "gpt-3.5-turbo", "gpt-4", "gpt-4o")
+    )
+
+    temperature = st.slider("Temperature", min_value=0.0, max_value=1.0, value=0.5, step=0.1)
+
     process_button = st.button("Process Documents")
-
-    # Load saved vector stores
-    st.subheader("Saved Knowledge Bases")
-    saved_vector_stores = [f.replace(".faiss", "") for f in os.listdir("data/vector_stores") if f.endswith(".faiss")]
-    if saved_vector_stores:
-        selected_vs = st.selectbox("Select a saved knowledge base", saved_vector_stores)
-        load_vs_button = st.button("Load Knowledge Base")
-
-        if load_vs_button and selected_vs:
-            with st.spinner(f"Loading knowledge base {selected_vs}..."):
-                # Load the vector store
-                embeddings = OpenAIEmbeddings()
-                vector_store = FAISS.load_local(f"data/vector_stores/{selected_vs}", embeddings)
-                st.session_state.vector_store = vector_store
-
-                # Create conversation chain
-                st.session_state.conversation = get_conversation_chain(vector_store)
-                st.session_state.processed_docs = True
-                st.sidebar.success(f"Knowledge base {selected_vs} loaded successfully!")
-    else:
-        st.info("No saved knowledge bases found.")
-
-    # Load saved conversations
-    st.subheader("Saved Conversations")
-    saved_conversations = [f.replace(".json", "") for f in os.listdir("data/conversations") if f.endswith(".json")]
-    if saved_conversations:
-        selected_conv = st.selectbox("Select a saved conversation", saved_conversations)
-        load_conv_button = st.button("Load Conversation")
-
-        if load_conv_button and selected_conv:
-            with st.spinner(f"Loading conversation {selected_conv}..."):
-                with open(f"data/conversations/{selected_conv}.json", "r") as f:
-                    st.session_state.chat_history = json.load(f)
-                st.sidebar.success(f"Conversation {selected_conv} loaded successfully!")
-    else:
-        st.info("No saved conversations found.")
-
-    # Save current conversation
-    if st.session_state.chat_history:
-        save_conv_name = st.text_input("Save current conversation as",
-                                       f"conversation_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
-        if st.button("Save Current Conversation"):
-            with open(f"data/conversations/{save_conv_name}.json", "w") as f:
-                json.dump(st.session_state.chat_history, f)
-            st.sidebar.success(f"Conversation saved as {save_conv_name}!")
 
 
 # Function to extract text from PDFs
-def extract_pdf_text(pdf_files):
+def extract_text_from_pdfs(pdf_files):
     text = ""
     for pdf in pdf_files:
-        pdf_reader = PdfReader(pdf)
-        for page in pdf_reader.pages:
-            text += page.extract_text()
+        # Create a temporary file to handle the uploaded file
+        with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+            temp_file.write(pdf.read())
+            temp_file_path = temp_file.name
+
+        try:
+            pdf_reader = PdfReader(temp_file_path)
+            for page in pdf_reader.pages:
+                text += page.extract_text() + "\n"
+        except Exception as e:
+            st.error(f"Error processing {pdf.name}: {str(e)}")
+        finally:
+            # Clean up the temporary file
+            os.unlink(temp_file_path)
+
     return text
 
 
-# Function to split text into chunks
-def split_text_into_chunks(text):
+# Function to create vector store from text
+def create_vector_store(text):
+    # Split text into chunks
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
         chunk_overlap=200,
         length_function=len
     )
-    return text_splitter.split_text(text)
+    chunks = text_splitter.split_text(text)
 
+    # Create embeddings and vector store
+    if not api_key:
+        st.warning("Please enter your OpenAI API key to enable embeddings.")
+        return None
 
-# Function to create vector store
-def create_vector_store(text_chunks):
-    embeddings = OpenAIEmbeddings()
-    vector_store = FAISS.from_texts(texts=text_chunks, embedding=embeddings)
-    return vector_store
+    try:
+        embeddings = OpenAIEmbeddings()
+        vector_store = FAISS.from_texts(texts=chunks, embedding=embeddings)
+        return vector_store
+    except Exception as e:
+        st.error(f"Error creating embeddings: {str(e)}")
+        return None
 
 
 # Function to create conversation chain
 def get_conversation_chain(vector_store):
-    llm = ChatOpenAI(temperature=0.2, model="gpt-3.5-turbo")
-    memory = ConversationBufferMemory(memory_key='chat_history', return_messages=True)
-    conversation_chain = ConversationalRetrievalChain.from_llm(
-        llm=llm,
-        retriever=vector_store.as_retriever(),
-        memory=memory
-    )
-    return conversation_chain
+    if not api_key:
+        return None
+
+    try:
+        llm = ChatOpenAI(model=model_option, temperature=temperature)
+        memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+        conversation_chain = ConversationalRetrievalChain.from_llm(
+            llm=llm,
+            retriever=vector_store.as_retriever(),
+            memory=memory
+        )
+        return conversation_chain
+    except Exception as e:
+        st.error(f"Error creating conversation chain: {str(e)}")
+        return None
 
 
-# Process documents when button is clicked
-if process_button and uploaded_files and api_key:
-    with st.spinner("Processing documents..."):
+# Process uploaded documents
+if process_button and uploaded_files:
+    with st.spinner("Processing PDFs..."):
         # Extract text from PDFs
-        raw_text = extract_pdf_text(uploaded_files)
+        extracted_text = extract_text_from_pdfs(uploaded_files)
 
-        # Split text into chunks
-        text_chunks = split_text_into_chunks(raw_text)
-        st.sidebar.info(f"Documents split into {len(text_chunks)} chunks")
+        if extracted_text:
+            # Create vector store
+            st.session_state.vector_store = create_vector_store(extracted_text)
 
-        # Create vector store
-        vector_store = create_vector_store(text_chunks)
-        st.session_state.vector_store = vector_store
+            if st.session_state.vector_store:
+                # Create conversation chain
+                st.session_state.conversation = get_conversation_chain(st.session_state.vector_store)
+                st.success(f"Successfully processed {len(uploaded_files)} document(s)!")
 
-        # Save vector store
-        vector_store.save_local(f"data/vector_stores/{knowledge_base_name}")
+                # Clear previous messages when new documents are processed
+                st.session_state.messages = []
+        else:
+            st.warning("No text could be extracted from the uploaded documents.")
 
-        # Create conversation chain
-        st.session_state.conversation = get_conversation_chain(vector_store)
-        st.session_state.processed_docs = True
-        st.sidebar.success(f"Documents processed and saved as '{knowledge_base_name}'!")
+# Display chat messages
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
 
-# Chat interface
-st.subheader("Chat")
+# Chat input
+if prompt := st.chat_input("Ask a question about your documents..."):
+    # Check if API key is provided
+    if not api_key:
+        st.warning("Please enter your OpenAI API key in the sidebar.")
+    # Check if documents are processed
+    elif st.session_state.conversation is None:
+        st.warning("Please upload and process documents first.")
+    else:
+        # Add user message to chat
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
 
-if not api_key:
-    st.warning("Please enter your OpenAI API key in the sidebar.")
-elif not st.session_state.processed_docs:
-    st.info("Upload your documents and click 'Process Documents' or load a saved knowledge base to start chatting.")
-else:
-    # Chat input and response
-    user_question = st.text_input("Ask a question about your documents:")
+        # Generate AI response
+        with st.chat_message("assistant"):
+            message_placeholder = st.empty()
 
-    if user_question:
-        with st.spinner("Thinking..."):
-            response = st.session_state.conversation({"question": user_question})
-            st.session_state.chat_history.append({"user": user_question, "bot": response["answer"]})
+            try:
+                result = st.session_state.conversation({"question": prompt})
+                response = result["answer"]
 
-    # Display chat history
-    for message in reversed(st.session_state.chat_history):
-        st.markdown(f"**You:** {message['user']}")
-        st.markdown(f"**Assistant:** {message['bot']}")
-        st.divider()
+                message_placeholder.markdown(response)
+                st.session_state.messages.append({"role": "assistant", "content": response})
+            except Exception as e:
+                error_message = f"Error generating response: {str(e)}"
+                message_placeholder.error(error_message)
+                st.session_state.messages.append({"role": "assistant", "content": error_message})
 
-# Display useful information in the expander
-with st.expander("How to use this app"):
+# Additional information in the sidebar
+with st.sidebar:
+    st.markdown("---")
+    st.markdown("### How to use")
     st.markdown("""
-    1. Enter your OpenAI API key in the sidebar
-    2. Upload PDF documents in the sidebar
-    3. Give your knowledge base a name and click 'Process Documents'
-    4. Ask questions about the content of your documents
-    5. Save conversations for future reference
-    6. Load previously created knowledge bases without reprocessing documents
+    1. Enter your OpenAI API key
+    2. Upload PDF documents
+    3. Click 'Process Documents'
+    4. Ask questions about the content
+    """)
 
-    **Note:** This app uses OpenAI's API to process your documents and generate responses, which may incur charges to your OpenAI account based on usage.
+    st.markdown("---")
+    st.markdown("### About")
+    st.markdown("""
+    This chatbot uses Retrieval-Augmented Generation (RAG) to:
+    - Extract text from uploaded PDFs
+    - Create embeddings of document chunks
+    - Retrieve relevant context from your documents
+    - Generate responses based on the document content
     """)
