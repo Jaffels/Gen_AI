@@ -1,0 +1,33 @@
+UNIVERSITY ASSIGNMENTS
+=====================
+
+Johan's Universities:
+1. Kalaidos University of Applied Sciences
+2. University of Fribourg
+3. University of Lausanne
+4. École Polytechnique Fédérale de Lausanne (EPFL)
+5. Università della Svizzera italiana (USI)
+
+Nhat's Universities:
+1. University of Geneva
+2. University of Applied Sciences and Arts Northwestern Switzerland (FHNW)
+3. Bern University of Applied Sciences (BFH)
+4. Zurich University of Applied Sciences (ZHAW)
+5. Lucerne School of Computer Science and Information Technology
+
+Thilo's Universities:
+1. University of Applied Sciences and Arts Western Switzerland (HES-SO)
+2. Lucerne University of Applied Sciences and Arts
+3. University of Applied Sciences and Arts of Southern Switzerland (SUPSI)
+4. University of Zurich
+5. ETH Zurich (Swiss Federal Institute of Technology in Zurich)
+
+Wenxing's Universities:
+1. University of Bern
+2. University of Applied Sciences of the Grisons (FHGR)
+3. University of Neuchâtel
+4. Eastern Switzerland University of Applied Sciences (OST)
+5. University of Basel
+
+
+Generated with random seed: 42
