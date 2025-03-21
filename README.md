@@ -4,13 +4,15 @@ Johan Ferreira, Nhat Bui, Thilo Holstein, Wenxing Xu
 
 ## Required Packages
 pip install streamlit PyPDF2 langchain langchain-openai faiss-cpu datetime  
-pip install langchain-openai langchain-community  
+pip install langchain-openai langchain-community 
+pip install sqlitecloud
+
 #### For improved performance on Mac install
 xcode-select --install  
 pip install watchdog
 
 ## Bash run the app
-streamlit run rag_chatbot.py
+streamlit run chatbot.py
 
 ## Uni question ideas
 
