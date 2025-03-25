@@ -14,6 +14,8 @@ pip install watchdog
 ## Bash run the app
 streamlit run chatbot.py
 
+python pdf_web_scraper.py www.website.com --output hslu --delay 2 --max-depth 5 
+
 ## Uni question ideas
 
 - Admission requirements
