@@ -3,17 +3,17 @@ import os
 import json
 import hashlib
 import sqlite3
+import io
 import base64
 from datetime import datetime
 from PyPDF2 import PdfReader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import OpenAIEmbeddings
+from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain.memory import ConversationBufferMemory
 from langchain.chains import ConversationalRetrievalChain
-from langchain_community.chat_models import ChatOpenAI
+from langchain_openai import ChatOpenAI
 import tempfile
-
 
 # Set your OpenAI API Key directly in the code
 OPENAI_API_KEY = ""
@@ -27,27 +27,32 @@ st.title("University Questions Chatbot")
 SAVE_DIR = os.path.join(os.getcwd(), "saved_sessions")
 os.makedirs(SAVE_DIR, exist_ok=True)
 
+# Create directory for PDF storage if it doesn't exist
+PDF_DIR = os.path.join(os.getcwd(), "pdf_files")
+os.makedirs(PDF_DIR, exist_ok=True)
+
 # Database setup
-DB_PATH = os.path.join(os.getcwd(), "rag_chatbot.db")
+DB_PATH = os.path.join(os.getcwd(), "rag_chatbot_new.db")
+
 
 def init_database():
     """Initialize the SQLite database with required tables"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
-    # Create table for PDF documents
+
+    # Create table for PDF documents metadata (no binary content)
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS documents (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
-        content BLOB NOT NULL,
+        file_path TEXT NOT NULL,
         pages INTEGER NOT NULL,
         upload_date TEXT NOT NULL,
         file_size INTEGER NOT NULL,
         processed BOOLEAN DEFAULT FALSE
     )
     ''')
-    
+
     # Create table for text chunks
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS chunks (
@@ -58,7 +63,7 @@ def init_database():
         FOREIGN KEY (document_id) REFERENCES documents(id)
     )
     ''')
-    
+
     # Create table for embeddings
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS embeddings (
@@ -70,7 +75,7 @@ def init_database():
         FOREIGN KEY (chunk_id) REFERENCES chunks(id)
     )
     ''')
-    
+
     # Create table for sessions
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS sessions (
@@ -81,7 +86,7 @@ def init_database():
         vector_store_path TEXT
     )
     ''')
-    
+
     # Create table for session_documents (many-to-many relationship)
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS session_documents (
@@ -92,7 +97,7 @@ def init_database():
         FOREIGN KEY (document_id) REFERENCES documents(id)
     )
     ''')
-    
+
     # Create table for messages
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS messages (
@@ -104,76 +109,79 @@ def init_database():
         FOREIGN KEY (session_id) REFERENCES sessions(id)
     )
     ''')
-    
+
     conn.commit()
     conn.close()
 
+
 # Database functions
-def save_pdf_to_db(file_obj, filename):
-    """Save a PDF file to the database"""
+def save_pdf_to_filesystem(file_obj, filename):
+    """Save a PDF file to the filesystem and store metadata in the database"""
     # Reset file pointer to beginning
     file_obj.seek(0)
-    
+
     # Read file content as binary
     pdf_content = file_obj.read()
     file_size = len(pdf_content)
     
-    # Create temporary file to read with PyPDF2
-    with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-        temp_file.write(pdf_content)
-        temp_file_path = temp_file.name
-    
-    # Get page count
-    try:
-        pdf_reader = PdfReader(temp_file_path)
-        page_count = len(pdf_reader.pages)
-    except Exception as e:
-        os.unlink(temp_file_path)
-        st.error(f"Error reading PDF: {str(e)}")
-        return None
-    finally:
-        os.unlink(temp_file_path)
-    
-    # Generate document ID
+    # Generate a unique ID for the document
     doc_id = hashlib.md5(pdf_content).hexdigest()
     
-    # Store in database
+    # Create a file path for saving the PDF
+    file_path = os.path.join(PDF_DIR, f"{doc_id}.pdf")
+    
+    # Save the PDF to the filesystem
+    with open(file_path, 'wb') as f:
+        f.write(pdf_content)
+
+    # Get page count
+    try:
+        pdf_reader = PdfReader(io.BytesIO(pdf_content))
+        page_count = len(pdf_reader.pages)
+    except Exception as e:
+        st.error(f"Error reading PDF: {str(e)}")
+        return None
+
+    # Store metadata in database
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
+
     # Check if document already exists
     cursor.execute("SELECT id FROM documents WHERE id = ?", (doc_id,))
     if cursor.fetchone() is None:
         cursor.execute(
-            "INSERT INTO documents (id, name, content, pages, upload_date, file_size, processed) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (doc_id, filename, pdf_content, page_count, datetime.now().isoformat(), file_size, False)
+            "INSERT INTO documents (id, name, file_path, pages, upload_date, file_size, processed) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (doc_id, filename, file_path, page_count, datetime.now().isoformat(), file_size, False)
         )
         conn.commit()
-    
+
     conn.close()
-    
+
     return {
         "id": doc_id,
         "name": filename,
+        "file_path": file_path,
         "pages": page_count,
         "size": file_size,
         "upload_date": datetime.now().isoformat()
     }
 
+
 def get_document_from_db(doc_id):
-    """Retrieve a document from the database by ID"""
+    """Retrieve document metadata from the database by ID"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
-    cursor.execute("SELECT id, name, content, pages, upload_date, file_size, processed FROM documents WHERE id = ?", (doc_id,))
+
+    cursor.execute("SELECT id, name, file_path, pages, upload_date, file_size, processed FROM documents WHERE id = ?",
+                   (doc_id,))
     doc = cursor.fetchone()
     conn.close()
-    
+
     if doc:
         return {
             "id": doc[0],
             "name": doc[1],
-            "content": doc[2],  # Binary content
+            "file_path": doc[2],
             "pages": doc[3],
             "upload_date": doc[4],
             "size": doc[5],
@@ -181,15 +189,16 @@ def get_document_from_db(doc_id):
         }
     return None
 
+
 def get_all_documents():
     """Get a list of all documents in the database"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
+
     cursor.execute("SELECT id, name, pages, upload_date, file_size, processed FROM documents")
     docs = cursor.fetchall()
     conn.close()
-    
+
     result = []
     for doc in docs:
         result.append({
@@ -200,61 +209,71 @@ def get_all_documents():
             "size": doc[4],
             "processed": bool(doc[5])
         })
-    
+
     return result
 
+
+def extract_text_from_file(file_path):
+    """Extract text from a PDF file on the filesystem"""
+    if not os.path.exists(file_path):
+        st.error(f"File not found: {file_path}")
+        return ""
+    
+    try:
+        pdf_reader = PdfReader(file_path)
+        text = ""
+
+        for page in pdf_reader.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + "\n"
+
+        return text
+    except Exception as e:
+        st.error(f"Error extracting text: {str(e)}")
+        return ""
+
+
 def extract_text_from_db_document(doc_id):
-    """Extract text from a document stored in the database"""
+    """Extract text from a document referenced in the database"""
     doc = get_document_from_db(doc_id)
     if not doc:
         return ""
+
+    text = extract_text_from_file(doc["file_path"])
     
-    # Create temporary file
-    with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-        temp_file.write(doc["content"])
-        temp_file_path = temp_file.name
-    
-    try:
-        pdf_reader = PdfReader(temp_file_path)
-        text = ""
-        
-        for page in pdf_reader.pages:
-            page_text = page.extract_text()
-            text += page_text + "\n"
-        
+    if text:
         # Mark document as processed
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("UPDATE documents SET processed = TRUE WHERE id = ?", (doc_id,))
         conn.commit()
         conn.close()
-        
-        return text
-    except Exception as e:
-        st.error(f"Error extracting text from {doc['name']}: {str(e)}")
-        return ""
-    finally:
-        # Clean up temporary file
-        os.unlink(temp_file_path)
+    
+    return text
+
 
 def save_chunks_to_db(doc_id, chunks, embeddings_list=None, model_name=None):
     """Save text chunks to the database with optional embeddings"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
+
     # First delete any existing chunks and their embeddings for this document
     # Get all chunk ids for this document
     cursor.execute("SELECT id FROM chunks WHERE document_id = ?", (doc_id,))
     chunk_ids = [row[0] for row in cursor.fetchall()]
-    
-    # Delete associated embeddings
+
+    # Delete associated embeddings in batches if there are many
     if chunk_ids:
-        placeholders = ','.join(['?'] * len(chunk_ids))
-        cursor.execute(f"DELETE FROM embeddings WHERE chunk_id IN ({placeholders})", chunk_ids)
-    
+        batch_size = 500  # Safe value below SQLite's limit
+        for i in range(0, len(chunk_ids), batch_size):
+            batch_chunk_ids = chunk_ids[i:i+batch_size]
+            placeholders = ','.join(['?'] * len(batch_chunk_ids))
+            cursor.execute(f"DELETE FROM embeddings WHERE chunk_id IN ({placeholders})", batch_chunk_ids)
+
     # Delete the chunks
     cursor.execute("DELETE FROM chunks WHERE document_id = ?", (doc_id,))
-    
+
     # Insert new chunks and their embeddings
     chunk_ids = []
     for i, chunk in enumerate(chunks):
@@ -264,7 +283,7 @@ def save_chunks_to_db(doc_id, chunks, embeddings_list=None, model_name=None):
             "INSERT INTO chunks (id, document_id, content, chunk_index) VALUES (?, ?, ?, ?)",
             (chunk_id, doc_id, chunk, i)
         )
-    
+
     # Insert embeddings if provided
     if embeddings_list and model_name and len(embeddings_list) == len(chunks):
         for chunk_id, embedding_vector in zip(chunk_ids, embeddings_list):
@@ -275,26 +294,28 @@ def save_chunks_to_db(doc_id, chunks, embeddings_list=None, model_name=None):
                 "INSERT INTO embeddings (id, chunk_id, embedding, model, created_at) VALUES (?, ?, ?, ?, ?)",
                 (embedding_id, chunk_id, embedding_blob, model_name, datetime.now().isoformat())
             )
-    
+
     conn.commit()
     conn.close()
+
 
 def get_chunks_for_document(doc_id):
     """Get all chunks for a document"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
+
     cursor.execute("SELECT id, content, chunk_index FROM chunks WHERE document_id = ? ORDER BY chunk_index", (doc_id,))
     chunks = cursor.fetchall()
     conn.close()
-    
+
     return [{"id": chunk[0], "content": chunk[1], "index": chunk[2]} for chunk in chunks]
+
 
 def get_embeddings_for_chunks(chunk_ids, model_name=None):
     """Get embeddings for specific chunks, optionally filtered by model"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
+
     if model_name:
         placeholders = ','.join(['?'] * len(chunk_ids))
         query = f"SELECT chunk_id, embedding FROM embeddings WHERE chunk_id IN ({placeholders}) AND model = ?"
@@ -303,31 +324,32 @@ def get_embeddings_for_chunks(chunk_ids, model_name=None):
         placeholders = ','.join(['?'] * len(chunk_ids))
         query = f"SELECT chunk_id, embedding FROM embeddings WHERE chunk_id IN ({placeholders})"
         cursor.execute(query, chunk_ids)
-    
+
     results = cursor.fetchall()
     conn.close()
-    
+
     embeddings_dict = {}
     for chunk_id, embedding_blob in results:
         # Deserialize the embedding vector from binary
         embedding_json = base64.b64decode(embedding_blob).decode()
         embedding_vector = json.loads(embedding_json)
         embeddings_dict[chunk_id] = embedding_vector
-    
+
     return embeddings_dict
+
 
 def save_session_to_db(session_name, document_ids, vector_store_path=None):
     """Save a session to the database"""
     # Generate session ID if needed
     if not st.session_state.session_id:
         st.session_state.session_id = hashlib.md5(f"{session_name}_{datetime.now().isoformat()}".encode()).hexdigest()
-    
+
     session_id = st.session_state.session_id
     now = datetime.now().isoformat()
-    
+
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
+
     # Check if session exists
     cursor.execute("SELECT id FROM sessions WHERE id = ?", (session_id,))
     if cursor.fetchone() is None:
@@ -342,29 +364,30 @@ def save_session_to_db(session_name, document_ids, vector_store_path=None):
             "UPDATE sessions SET name = ?, last_modified = ?, vector_store_path = ? WHERE id = ?",
             (session_name, now, vector_store_path, session_id)
         )
-    
+
     # Clear existing document associations
     cursor.execute("DELETE FROM session_documents WHERE session_id = ?", (session_id,))
-    
+
     # Add document associations
     for doc_id in document_ids:
         cursor.execute(
             "INSERT INTO session_documents (session_id, document_id) VALUES (?, ?)",
             (session_id, doc_id)
         )
-    
+
     # Save messages
     cursor.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
     for msg in st.session_state.messages:
-        msg_id = hashlib.md5(f"{session_id}_{msg['role']}_{msg['content']}_{datetime.now().isoformat()}".encode()).hexdigest()
+        msg_id = hashlib.md5(
+            f"{session_id}_{msg['role']}_{msg['content']}_{datetime.now().isoformat()}".encode()).hexdigest()
         cursor.execute(
             "INSERT INTO messages (id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
             (msg_id, session_id, msg['role'], msg['content'], now)
         )
-    
+
     conn.commit()
     conn.close()
-    
+
     # Update session metadata in session state
     st.session_state.sessions_metadata[session_name] = {
         "id": session_id,
@@ -373,11 +396,10 @@ def save_session_to_db(session_name, document_ids, vector_store_path=None):
         "document_count": len(document_ids),
         "message_count": len(st.session_state.messages)
     }
-    
+
     return session_id
 
 
-# Modify the load_session_from_db function to add the allow_dangerous_deserialization parameter
 def load_session_from_db(session_name):
     """Load a session from the database"""
     if session_name not in st.session_state.sessions_metadata:
@@ -440,7 +462,6 @@ def load_session_from_db(session_name):
         # Fall back to file-based vector store
 
     # Fall back to loading vector store from file if it exists
-    # Fall back to loading vector store from file if it exists
     if vector_store_path and os.path.exists(vector_store_path):
         try:
             embeddings = OpenAIEmbeddings()
@@ -459,120 +480,60 @@ def load_session_from_db(session_name):
     return True
 
 
-# Also modify the save_session_to_db function to ensure consistent behavior when saving
-def save_session_to_db(session_name, document_ids, vector_store_path=None):
-    """Save a session to the database"""
-    # Generate session ID if needed
-    if not st.session_state.session_id:
-        st.session_state.session_id = hashlib.md5(f"{session_name}_{datetime.now().isoformat()}".encode()).hexdigest()
-
-    session_id = st.session_state.session_id
-    now = datetime.now().isoformat()
-
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-
-    # Check if session exists
-    cursor.execute("SELECT id FROM sessions WHERE id = ?", (session_id,))
-    if cursor.fetchone() is None:
-        # Create new session
-        cursor.execute(
-            "INSERT INTO sessions (id, name, created, last_modified, vector_store_path) VALUES (?, ?, ?, ?, ?)",
-            (session_id, session_name, now, now, vector_store_path)
-        )
-    else:
-        # Update existing session
-        cursor.execute(
-            "UPDATE sessions SET name = ?, last_modified = ?, vector_store_path = ? WHERE id = ?",
-            (session_name, now, vector_store_path, session_id)
-        )
-
-    # Clear existing document associations
-    cursor.execute("DELETE FROM session_documents WHERE session_id = ?", (session_id,))
-
-    # Add document associations
-    for doc_id in document_ids:
-        cursor.execute(
-            "INSERT INTO session_documents (session_id, document_id) VALUES (?, ?)",
-            (session_id, doc_id)
-        )
-
-    # Save messages
-    cursor.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
-    for msg in st.session_state.messages:
-        msg_id = hashlib.md5(
-            f"{session_id}_{msg['role']}_{msg['content']}_{datetime.now().isoformat()}".encode()).hexdigest()
-        cursor.execute(
-            "INSERT INTO messages (id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
-            (msg_id, session_id, msg['role'], msg['content'], now)
-        )
-
-    conn.commit()
-    conn.close()
-
-    # Update session metadata in session state
-    st.session_state.sessions_metadata[session_name] = {
-        "id": session_id,
-        "created": now,
-        "last_modified": now,
-        "document_count": len(document_ids),
-        "message_count": len(st.session_state.messages)
-    }
-
-    return session_id
-
 def delete_session_from_db(session_name):
     """Delete a session from the database"""
     if session_name not in st.session_state.sessions_metadata:
         st.error(f"Session '{session_name}' not found.")
         return False
-    
+
     session_id = st.session_state.sessions_metadata[session_name]["id"]
-    
+
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
+
     # Get vector store path to delete files
     cursor.execute("SELECT vector_store_path FROM sessions WHERE id = ?", (session_id,))
     vector_store_path = cursor.fetchone()[0]
-    
+
     # Delete related records
     cursor.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
     cursor.execute("DELETE FROM session_documents WHERE session_id = ?", (session_id,))
     cursor.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
-    
+
     conn.commit()
     conn.close()
-    
+
     # Delete vector store files if they exist
     if vector_store_path and os.path.exists(vector_store_path):
         import shutil
         shutil.rmtree(vector_store_path)
-    
+
     # Remove from session state
     del st.session_state.sessions_metadata[session_name]
-    
+
     return True
+
 
 # Function to extract text from PDFs
 def extract_text_from_pdfs(pdf_files):
     """Extract text from uploaded PDF files"""
     processed_files = []
     all_text = ""
-    
+
     for pdf in pdf_files:
-        # Save PDF to database
-        doc_info = save_pdf_to_db(pdf, pdf.name)
-        
+        # Save PDF to filesystem and store metadata in database
+        doc_info = save_pdf_to_filesystem(pdf, pdf.name)
+
         if doc_info:
             # Extract text from the saved document
-            doc_text = extract_text_from_db_document(doc_info["id"])
+            doc_text = extract_text_from_file(doc_info["file_path"])
             all_text += doc_text
-            
+
             # Add to processed files list
             processed_files.append(doc_info)
-    
+
     return all_text, processed_files
+
 
 def auto_handle_embeddings(uploaded_files=None, selected_doc_ids=None):
     """Automatically handle embeddings for uploaded files and selected documents
@@ -653,20 +614,24 @@ def auto_handle_embeddings(uploaded_files=None, selected_doc_ids=None):
 
                     # Extract text if this is a selected document (not newly uploaded)
                     if doc_id not in [doc["id"] for doc in newly_processed_files]:
-                        doc_text = extract_text_from_db_document(doc_id)
-                        if doc_text:
-                            text_to_process += doc_text
-                            docs_needing_embeddings[doc_id] = doc_text
+                        doc = get_document_from_db(doc_id)
+                        if doc:
+                            doc_text = extract_text_from_file(doc["file_path"])
+                            if doc_text:
+                                text_to_process += doc_text
+                                docs_needing_embeddings[doc_id] = doc_text
             else:
                 # No chunks found, document needs processing
                 need_embeddings.append(doc_id)
 
                 # Extract text if this is a selected document (not newly uploaded)
                 if doc_id not in [doc["id"] for doc in newly_processed_files]:
-                    doc_text = extract_text_from_db_document(doc_id)
-                    if doc_text:
-                        text_to_process += doc_text
-                        docs_needing_embeddings[doc_id] = doc_text
+                    doc = get_document_from_db(doc_id)
+                    if doc:
+                        doc_text = extract_text_from_file(doc["file_path"])
+                        if doc_text:
+                            text_to_process += doc_text
+                            docs_needing_embeddings[doc_id] = doc_text
 
         # Create final vector store
         final_vector_store = None
@@ -697,7 +662,7 @@ def auto_handle_embeddings(uploaded_files=None, selected_doc_ids=None):
 
                 # Create embeddings model with the hardcoded API key
                 embeddings_model = OpenAIEmbeddings()
-                
+
                 # Get model name
                 model_name = "openai"
                 if hasattr(embeddings_model, "model"):
@@ -745,6 +710,7 @@ def auto_handle_embeddings(uploaded_files=None, selected_doc_ids=None):
             st.warning("Could not create or retrieve embeddings for the documents.")
             return False
 
+
 def auto_process_uploaded_files(uploaded_files):
     """Process newly uploaded files automatically with automatic embedding management"""
     if not uploaded_files:
@@ -768,9 +734,11 @@ def auto_process_uploaded_files(uploaded_files):
         st.info(f"Auto-processing {len(new_files)} new file(s)...")
         auto_handle_embeddings(uploaded_files=new_files)
 
+
 def process_documents(uploaded_files=None, selected_doc_ids=None):
     """Process documents using automatic embedding handling"""
     return auto_handle_embeddings(uploaded_files, selected_doc_ids)
+
 
 def create_vector_store_from_db(doc_ids, model_name="openai"):
     """Create a vector store from chunks and embeddings stored in the database"""
@@ -824,6 +792,7 @@ def create_vector_store_from_db(doc_ids, model_name="openai"):
     # The calling function should handle creating new embeddings
     return None
 
+
 def get_conversation_chain(vector_store):
     """Create a conversation chain using the vector store"""
     try:
@@ -853,6 +822,7 @@ def get_conversation_chain(vector_store):
         st.error(f"Error creating conversation chain: {str(e)}")
         return None
 
+
 # Initialize the database
 init_database()
 
@@ -879,17 +849,17 @@ if "sessions_metadata" not in st.session_state:
     cursor = conn.cursor()
     cursor.execute("SELECT id, name, created, last_modified FROM sessions")
     sessions = cursor.fetchall()
-    
+
     for session in sessions:
         session_id, name, created, last_modified = session
         # Count documents for this session
         cursor.execute("SELECT COUNT(*) FROM session_documents WHERE session_id = ?", (session_id,))
         doc_count = cursor.fetchone()[0]
-        
+
         # Count messages for this session
         cursor.execute("SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,))
         msg_count = cursor.fetchone()[0]
-        
+
         st.session_state.sessions_metadata[name] = {
             "id": session_id,
             "created": created,
@@ -897,29 +867,13 @@ if "sessions_metadata" not in st.session_state:
             "document_count": doc_count,
             "message_count": msg_count
         }
-    
+
     conn.close()
 
 # Keep track of previously uploaded files to detect new ones
 if "previous_uploaded_files" not in st.session_state:
     st.session_state.previous_uploaded_files = []
 
-# Auto-load most recent session if none is active
-if not st.session_state.session_id and st.session_state.sessions_metadata:
-    # Find the most recently modified session
-    most_recent_session = None
-    most_recent_timestamp = None
-
-    for name, metadata in st.session_state.sessions_metadata.items():
-        timestamp = metadata.get("last_modified")
-        if timestamp and (most_recent_timestamp is None or timestamp > most_recent_timestamp):
-            most_recent_timestamp = timestamp
-            most_recent_session = name
-
-    # Load the most recent session
-    if most_recent_session:
-        if load_session_from_db(most_recent_session):
-            st.success(f"Automatically loaded your most recent session: '{most_recent_session}'")
 
 # Initialize the embedding model with the hardcoded API key
 try:
@@ -935,12 +889,12 @@ col1, col2 = st.columns([2, 1])
 with col1:
     # Display chat messages
     st.subheader("Chat with your documents")
-    
+
     # Show chat messages
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
-    
+
     # Chat input
     if prompt := st.chat_input("Ask a question about your documents..."):
         # Check if documents are processed
@@ -951,18 +905,18 @@ with col1:
             st.session_state.messages.append({"role": "user", "content": prompt})
             with st.chat_message("user"):
                 st.markdown(prompt)
-            
+
             # Generate AI response
             with st.chat_message("assistant"):
                 message_placeholder = st.empty()
-                
+
                 try:
                     result = st.session_state.conversation({"question": prompt})
                     response = result["answer"]
-                    
+
                     message_placeholder.markdown(response)
                     st.session_state.messages.append({"role": "assistant", "content": response})
-                    
+
                     # Auto-save session if there's an existing session id
                     if st.session_state.session_id and st.session_state.sessions_metadata:
                         # Find session name from id
@@ -971,7 +925,7 @@ with col1:
                             if metadata["id"] == st.session_state.session_id:
                                 session_name = name
                                 break
-                        
+
                         if session_name:
                             # Get document IDs for this session
                             doc_ids = [doc["id"] for doc in st.session_state.processed_files]
@@ -979,7 +933,7 @@ with col1:
                             vector_store_path = os.path.join(SAVE_DIR, st.session_state.session_id, "vector_store")
                             # Save session to database
                             save_session_to_db(session_name, doc_ids, vector_store_path)
-                    
+
                 except Exception as e:
                     error_message = f"Error generating response: {str(e)}"
                     message_placeholder.error(error_message)
@@ -990,77 +944,72 @@ with col2:
     # Configuration section
     st.subheader("Configuration")
     st.info("Using gpt-4o-mini model")
-    
-    # Upload Documents section
-    st.subheader("Upload Documents")
-    uploaded_files = st.file_uploader("Upload PDF files", type="pdf", accept_multiple_files=True)
-    
-    # Auto-process newly uploaded files
-    if uploaded_files:
-        auto_process_uploaded_files(uploaded_files)
-    
+
     # Session Management section
     st.subheader("Session Management")
-    
+
     # Save current session
     session_name = st.text_input("Session Name", placeholder="Enter a name for this session")
     save_button = st.button("Save Current Session")
-    
+
     if save_button and session_name:
         # Save vector store if it exists
         vector_store_path = None
         if st.session_state.vector_store:
-            vector_store_path = os.path.join(SAVE_DIR, st.session_state.session_id or hashlib.md5(session_name.encode()).hexdigest(), "vector_store")
+            vector_store_path = os.path.join(SAVE_DIR, st.session_state.session_id or hashlib.md5(
+                session_name.encode()).hexdigest(), "vector_store")
             os.makedirs(os.path.dirname(vector_store_path), exist_ok=True)
             st.session_state.vector_store.save_local(vector_store_path)
-        
+
         # Get document IDs for this session
         doc_ids = [doc["id"] for doc in st.session_state.processed_files]
-        
+
         # Save session to database
         save_session_to_db(session_name, doc_ids, vector_store_path)
-        
+
         st.success(f"Session '{session_name}' saved successfully!")
-    
+
     # Load existing session
     st.subheader("Load Existing Session")
     session_options = list(st.session_state.sessions_metadata.keys())
-    
+
     if session_options:
         selected_session = st.selectbox("Select a session to load", session_options)
         load_button = st.button("Load Selected Session")
-        
+
         if load_button and selected_session:
             if load_session_from_db(selected_session):
                 st.success(f"Session '{selected_session}' loaded successfully!")
                 st.rerun()  # Rerun the app to update UI with loaded session
     else:
         st.info("No saved sessions found.")
-    
+
     # Delete session option
     if session_options:
         st.subheader("Delete Session")
         delete_session = st.selectbox("Select a session to delete", session_options, key="delete_selector")
         delete_button = st.button("Delete Selected Session")
-        
+
         if delete_button and delete_session:
             if delete_session_from_db(delete_session):
                 st.success(f"Session '{delete_session}' deleted successfully!")
                 st.rerun()
 
-# Show which documents are currently active in the session
-if st.session_state.processed_files:
-    st.sidebar.subheader("Active Documents in Session")
-    for doc in st.session_state.processed_files:
-        st.sidebar.write(f"📄 {doc.get('name')} - {doc.get('pages')} pages")
+    # Upload Documents section
+    st.subheader("Upload Documents")
+    uploaded_files = st.file_uploader("Upload PDF files", type="pdf", accept_multiple_files=True)
+
+    # Auto-process newly uploaded files
+    if uploaded_files:
+        auto_process_uploaded_files(uploaded_files)
 
 # Footer with additional information
 st.sidebar.markdown("---")
 st.sidebar.subheader("About")
 st.sidebar.markdown("""
-This RAG chatbot uses a database to store and manage PDF documents:
+This RAG chatbot saves PDFs to the filesystem and uses a database for metadata:
 
-- PDFs are stored in SQLite for persistence
+- PDFs are stored in the filesystem for better security
 - Text chunks and their vector embeddings are stored in the database
 - Embeddings are reused when possible to reduce API costs
 - Performance improves with each session as more embeddings are cached
