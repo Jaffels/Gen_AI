@@ -3,31 +3,47 @@ Group project for Generative AI
 Johan Ferreira, Nhat Bui, Thilo Holstein, Wenxing Xu 
 
 ## Required Packages
-pip install streamlit PyPDF2 langchain langchain-openai faiss-cpu datetime  
-pip install langchain-openai langchain-community 
-pip install pycryptodome
+streamlit
+PyPDF2
+langchain
+langchain-openai
+langchain-community
+faiss-cpu
+openai
+python-dotenv
+numpy
+#### Run this code in your virtual enviroment's terminal
+pip install streamlit PyPDF2 langchain langchain-openai langchain-community faiss-cpu openai python-dotenv numpy
 
 #### For improved performance on Mac install
 xcode-select --install  
 pip install watchdog
 
-## Bash run the app
+## Bash run the chatbot (run in your terminal)
 streamlit run chatbot.py
 
-python pdf_web_scraper.py www.website.com --output hslu --delay 2 --max-depth 5 
+## Break down of data collection strategies and Universities
+### Gemini sourced
+- FHGR
+- OST
+- EPFL
+- SUPSI
+- University of Zurich
+- University of Western Switzerland
+- Bern
+- UniNE
 
-## Uni question ideas
+### Manually sourced
+- BFH
+- FHNW
+- HSLU
+- UGE
 
-- Admission requirements
-- Semester Fees
-- Rank of Uni
-- Research citations
-- Amount of Programs
-- Employability after graduation
-- Salary after graduation
-- Campus Rating
-- Faculty to student ratio
-- Inovation Rankings
-- Sustainability impact
-- Diversity
-- STEM
+### Webscrapping sourced
+- ETH
+- ZHAW
+
+Questions
+- What is the cost per semester?
+- Do the University have a Masters program in Data Science?
+- Does the university have a world wide or QS ranking?
